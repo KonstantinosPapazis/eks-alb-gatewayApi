@@ -37,4 +37,5 @@ override.tf.json
 terraform.rc
 
 creds.sh
+.terraform.lock.hcl
 

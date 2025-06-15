@@ -1,0 +1,294 @@
+################################################################################
+# NGINX Gateway Fabric Implementation for Gateway API
+################################################################################
+
+# Since you've already installed Gateway API CRDs manually, we'll skip that step
+
+# Example Namespace
+resource "kubernetes_namespace" "example" {
+  metadata {
+    name = "example-app"
+  }
+
+  depends_on = [module.eks]
+}
+
+# Example Deployment
+resource "kubernetes_deployment" "example_app" {
+  metadata {
+    name      = "example-app"
+    namespace = kubernetes_namespace.example.metadata[0].name
+    labels = {
+      app = "example-app"
+    }
+  }
+
+  spec {
+    replicas = 3
+
+    selector {
+      match_labels = {
+        app = "example-app"
+      }
+    }
+
+    template {
+      metadata {
+        labels = {
+          app = "example-app"
+        }
+      }
+
+      spec {
+        container {
+          name  = "app"
+          image = "public.ecr.aws/nginx/nginx:latest"
+
+          port {
+            container_port = 80
+          }
+
+          resources {
+            limits = {
+              cpu    = "100m"
+              memory = "128Mi"
+            }
+            requests = {
+              cpu    = "50m"
+              memory = "64Mi"
+            }
+          }
+
+          # Custom nginx config to show which pod is serving
+          volume_mount {
+            name       = "nginx-config"
+            mount_path = "/usr/share/nginx/html"
+          }
+        }
+
+        volume {
+          name = "nginx-config"
+          config_map {
+            name = kubernetes_config_map.nginx_content.metadata[0].name
+          }
+        }
+      }
+    }
+  }
+
+  depends_on = [module.eks]
+}
+
+# ConfigMap for custom nginx content
+resource "kubernetes_config_map" "nginx_content" {
+  metadata {
+    name      = "nginx-content"
+    namespace = kubernetes_namespace.example.metadata[0].name
+  }
+
+  data = {
+    "index.html" = <<-EOT
+      <!DOCTYPE html>
+      <html>
+      <head>
+          <title>NGINX Gateway API Demo</title>
+          <style>
+              body { font-family: Arial, sans-serif; margin: 40px; }
+              .container { max-width: 600px; margin: 0 auto; }
+              .info { background: #f0f0f0; padding: 20px; border-radius: 8px; }
+          </style>
+      </head>
+      <body>
+          <div class="container">
+              <h1>Welcome to NGINX Gateway API Demo</h1>
+              <div class="info">
+                  <p>This page is served through:</p>
+                  <ul>
+                      <li>NGINX Gateway Fabric</li>
+                      <li>Kubernetes Gateway API</li>
+                      <li>AWS EKS Cluster</li>
+                  </ul>
+                  <p>Pod hostname: <strong>HOSTNAME_PLACEHOLDER</strong></p>
+              </div>
+          </div>
+      </body>
+      </html>
+    EOT
+  }
+}
+
+# Example Service
+resource "kubernetes_service" "example_app" {
+  metadata {
+    name      = "example-app-service"
+    namespace = kubernetes_namespace.example.metadata[0].name
+  }
+
+  spec {
+    selector = {
+      app = "example-app"
+    }
+
+    port {
+      port        = 80
+      target_port = 80
+      protocol    = "TCP"
+    }
+
+    type = "ClusterIP"
+  }
+
+  depends_on = [module.eks]
+}
+
+################################################################################
+# NGINX Gateway Fabric Installation
+################################################################################
+
+# Install NGINX Gateway Fabric
+resource "helm_release" "nginx_gateway" {
+  name             = "nginx-gateway"
+  repository       = "oci://ghcr.io/nginxinc/charts"
+  chart            = "nginx-gateway-fabric"
+  version          = "1.5.0"
+  namespace        = "nginx-gateway"
+  create_namespace = true
+
+  set {
+    name  = "service.type"
+    value = "LoadBalancer"
+  }
+
+  set {
+    name  = "service.annotations.service\\.beta\\.kubernetes\\.io/aws-load-balancer-type"
+    value = "nlb"
+  }
+
+  set {
+    name  = "service.annotations.service\\.beta\\.kubernetes\\.io/aws-load-balancer-scheme"
+    value = "internet-facing"
+  }
+
+  depends_on = [
+    module.eks
+  ]
+}
+
+################################################################################
+# Gateway API Resources
+################################################################################
+
+# GatewayClass for NGINX
+resource "kubernetes_manifest" "gateway_class_nginx" {
+  manifest = {
+    apiVersion = "gateway.networking.k8s.io/v1"
+    kind       = "GatewayClass"
+    metadata = {
+      name = "nginx"
+    }
+    spec = {
+      controllerName = "gateway.nginx.org/nginx-gateway-controller"
+    }
+  }
+
+  depends_on = [
+    helm_release.nginx_gateway
+  ]
+}
+
+# Gateway using NGINX
+resource "kubernetes_manifest" "gateway_nginx" {
+  manifest = {
+    apiVersion = "gateway.networking.k8s.io/v1"
+    kind       = "Gateway"
+    metadata = {
+      name      = "main-gateway"
+      namespace = kubernetes_namespace.example.metadata[0].name
+    }
+    spec = {
+      gatewayClassName = "nginx"
+      listeners = [
+        {
+          name     = "http"
+          port     = 80
+          protocol = "HTTP"
+          allowedRoutes = {
+            namespaces = {
+              from = "Same"
+            }
+          }
+        }
+      ]
+    }
+  }
+
+  depends_on = [
+    kubernetes_manifest.gateway_class_nginx
+  ]
+}
+
+# HTTPRoute for the gateway
+resource "kubernetes_manifest" "http_route" {
+  manifest = {
+    apiVersion = "gateway.networking.k8s.io/v1"
+    kind       = "HTTPRoute"
+    metadata = {
+      name      = "example-route"
+      namespace = kubernetes_namespace.example.metadata[0].name
+    }
+    spec = {
+      parentRefs = [
+        {
+          name = "main-gateway"
+        }
+      ]
+      rules = [
+        {
+          matches = [
+            {
+              path = {
+                type  = "PathPrefix"
+                value = "/"
+              }
+            }
+          ]
+          backendRefs = [
+            {
+              name = kubernetes_service.example_app.metadata[0].name
+              port = 80
+            }
+          ]
+        }
+      ]
+    }
+  }
+
+  depends_on = [
+    kubernetes_manifest.gateway_nginx,
+    kubernetes_service.example_app
+  ]
+}
+
+################################################################################
+# Outputs
+################################################################################
+
+output "nginx_gateway_loadbalancer" {
+  description = "NGINX Gateway LoadBalancer URL"
+  value       = "Run: kubectl get svc -n nginx-gateway nginx-gateway -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'"
+}
+
+output "gateway_status" {
+  description = "Check Gateway status"
+  value       = "Run: kubectl get gateway -n ${kubernetes_namespace.example.metadata[0].name} main-gateway"
+}
+
+output "test_commands" {
+  description = "Commands to test the setup"
+  value = {
+    check_pods     = "kubectl get pods -n nginx-gateway"
+    check_gateway  = "kubectl get gateway -A"
+    check_routes   = "kubectl get httproute -A"
+    get_lb_url     = "kubectl get svc -n nginx-gateway nginx-gateway -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'"
+  }
+} 
