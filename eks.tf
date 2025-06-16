@@ -31,6 +31,7 @@ module "eks" {
         "SSMManagedInstanceCore" = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
       }
       instance_types = ["t3.medium"]
+      labels = {}
 
       min_size     = 2
       max_size     = 3
@@ -43,6 +44,7 @@ module "eks" {
         "SSMManagedInstanceCore" = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
       }
       instance_types = ["t3.medium"]
+      labels = {}
 
       min_size     = 2
       max_size     = 3
